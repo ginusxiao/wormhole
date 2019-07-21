@@ -173,3 +173,24 @@ object StreamType extends Enumeration {
   def streamType(s: String) = StreamType.withName(s.toLowerCase)
 
 }
+
+object KafkaVersion extends Enumeration{
+  type KafkaVersion = Value
+
+  val KAFKA_MIN = Value("0.10.0.0")
+  val KAFKA_010 = Value("0.10.0.0")
+  val KAFKA_0102= Value("0.10.2.2")
+  val KAFKA_UNKOWN= Value("")
+
+  def kafkaVersion(s: String) = KafkaVersion.withName(s.toLowerCase)
+
+}
+
+object FeedbackDirectiveType extends Enumeration {
+  type FeedbackDirectiveType = Value
+  val FLOW = Value("flow")
+  val UDF = Value("udf")
+  val TOPIC = Value("topic")
+
+  def feedbackDirectiveType(s: String) = FeedbackDirectiveType.withName(s.toLowerCase)
+}

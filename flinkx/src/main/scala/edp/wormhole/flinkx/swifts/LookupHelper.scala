@@ -30,6 +30,7 @@ import edp.wormhole.util.CommonUtils
 import edp.wormhole.util.config.ConnectionConfig
 import edp.wormhole.util.swifts.SwiftsSql
 import org.apache.flink.api.common.typeinfo.TypeInformation
+import org.apache.flink.table.api.Types
 import org.apache.flink.types.Row
 import org.apache.log4j.Logger
 
@@ -133,7 +134,7 @@ object LookupHelper extends java.io.Serializable {
     val sourceTableFields: Array[String] = if (swiftsSql.sourceTableFields.isDefined) swiftsSql.sourceTableFields.get else null
     val lookupTableFields = if (swiftsSql.lookupTableFields.isDefined) swiftsSql.lookupTableFields.get else null
     val sql = swiftsSql.sql
-    val joinFieldsValueArray: Array[Any] = joinFieldsInRow(row, lookupTableFields, sourceTableFields, preSchemaMap)
+    val joinFieldsValueArray: Array[Any] = joinFieldsInRow(row, lookupTableFields, sourceTableFields, preSchemaMap, true)
     UmsDataSystem.dataSystem(dataSystem) match {
       case UmsDataSystem.CASSANDRA => getCassandraSql(joinFieldsValueArray, sql, lookupTableFields)
       case _ => getRmdbSql(joinFieldsValueArray, sql, lookupTableFields)
@@ -143,10 +144,14 @@ object LookupHelper extends java.io.Serializable {
   def joinFieldsInRow(row: Row,
                       lookupTableFields: Array[String],
                       sourceTableFields: Array[String],
-                      preSchemaMap: Map[String, (TypeInformation[_], Int)]): Array[Any] = {
+                      preSchemaMap: Map[String, (TypeInformation[_], Int)],
+                      exeSql: Boolean): Array[Any] = {
     val fieldContent = sourceTableFields.map(fieldName => {
-      val value = FlinkSchemaUtils.object2TrueValue(preSchemaMap(fieldName.trim)._1, row.getField(preSchemaMap(fieldName.trim)._2))
-      if (value != null) value else "N/A"
+      var value = FlinkSchemaUtils.object2TrueValue(preSchemaMap(fieldName.trim)._1, row.getField(preSchemaMap(fieldName.trim)._2))
+      value =if (value != null) value else "N/A"
+      if (exeSql && (preSchemaMap(fieldName)._1 == Types.STRING || preSchemaMap(fieldName)._1 == Types.SQL_TIMESTAMP || preSchemaMap(fieldName)._1 == Types.SQL_DATE))
+        "'" + value + "'"
+      else value
     })
     if (!fieldContent.contains("N/A")) {
       fieldContent

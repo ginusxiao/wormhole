@@ -88,6 +88,9 @@ object DbConnection extends Serializable {
 //    } else if (tmpJdbcUrl.indexOf("greenplum") > -1) {
 //      println("greenplum")
 //      config.setDriverClassName("com.pivotal.jdbc.GreenplumDriver")
+    } else if (tmpJdbcUrl.indexOf("clickhouse")> -1){
+      println("clickhouse")
+      config.setDriverClassName("ru.yandex.clickhouse.ClickHouseDriver")
     }
 
 
@@ -100,6 +103,7 @@ object DbConnection extends Serializable {
     if(tmpJdbcUrl.indexOf("sql4es") < 0){
       config.addDataSourceProperty("cachePrepStmts", "true")
       config.addDataSourceProperty("maximumPoolSize", "1")
+      config.addDataSourceProperty("validationTimeout", "3000")
       config.addDataSourceProperty("prepStmtCacheSize", "250")
       config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048")
     }

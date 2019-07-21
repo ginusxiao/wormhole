@@ -22,6 +22,7 @@
 package edp.wormhole.sinks.dbsink
 
 import edp.wormhole.sinks.SourceMutationType
+import edp.wormhole.sinks.kafkasink.OracleSequenceConfig
 import edp.wormhole.sinks.utils.SinkCommonUtils
 
 case class DbConfig(`mutation_type`: Option[String] = None,
@@ -29,11 +30,11 @@ case class DbConfig(`mutation_type`: Option[String] = None,
                     `db.partition_keys`: Option[String] = None,
                     `db.system_fields_rename`: Option[String] = None,
                     //                     `db.connection_password`: String,
-                    `db.function_table`: Option[String] = None
-                   ) {
+                    `db.function_table`: Option[String] = None,
+                    oracle_sequence_config: Option[OracleSequenceConfig] = None) {
   lazy val `mutation_type.get` = `mutation_type`.getOrElse(SourceMutationType.I_U_D.toString)
-  lazy val `db.sql_batch_size.get` = `batch_size`.getOrElse(100)
+  lazy val `db.sql_batch_size.get` = `batch_size`.getOrElse(1000)
   lazy val partitionKeyList = SinkCommonUtils.keys2keyList(`db.partition_keys`.orNull)
   lazy val edpTable = `db.function_table`.getOrElse("edp")
-  lazy val system_fields_rename =  `db.system_fields_rename`.getOrElse("")
+  lazy val system_fields_rename = `db.system_fields_rename`.getOrElse("")
 }

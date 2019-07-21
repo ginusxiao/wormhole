@@ -22,8 +22,9 @@ package edp.wormhole.flinkx.pattern
 
 import java.sql.{Date, Timestamp}
 
-import com.alibaba.fastjson.JSONObject
+import com.alibaba.fastjson.{JSONArray, JSONObject}
 import edp.wormhole.flinkx.ordering.OrderingImplicit._
+import edp.wormhole.flinkx.pattern.FieldType.{AGG_FIELD, FieldType, KEY_BY_FIELD, SYSTEM_FIELD}
 import edp.wormhole.flinkx.pattern.Functions.{HEAD, LAST, MAX, MIN}
 import edp.wormhole.flinkx.pattern.Output._
 import edp.wormhole.flinkx.pattern.OutputType._
@@ -38,26 +39,31 @@ import org.apache.flink.table.api.Types
 import org.apache.flink.types.Row
 import org.slf4j.LoggerFactory
 
+import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 import scala.language.existentials
 import scala.math.Ordering
 
 class PatternOutput(output: JSONObject, schemaMap: Map[String, (TypeInformation[_], Int)]) extends java.io.Serializable {
+
   private lazy val logger = LoggerFactory.getLogger(this.getClass)
-  private val outputType = output.getString(TYPE.toString)
-  private val outputFieldList: Array[String] =
-    if (output.containsKey(FIELDLIST.toString)) {
-      output.getString(FIELDLIST.toString).split(",")
+  private lazy val outputType = output.getString(TYPE.toString)
+  private lazy val outputFieldArray: JSONArray =
+    if (output.containsKey(FIELD_LIST.toString)) {
+      output.getJSONArray(FIELD_LIST.toString)
     } else {
-      Array.empty[String]
+      null.asInstanceOf[JSONArray]
     }
 
+  def getOutputType: String = {
+    outputType
+  }
+
   def getOutput(patternStream: PatternStream[Row], patternGenerator: PatternGenerator, keyByFields: String): DataStream[(Boolean, Row)] = {
-    val patternNameList: Seq[String] = patternGenerator.outputPatternNameList
     var flag = true
     val out = patternStream.select(patternSelectFun => {
       try {
-        val eventSeq = for (name <- patternNameList)
-          yield patternSelectFun(name)
+        val eventSeq = patternSelectFun.values
         OutputType.outputType(outputType) match {
           case AGG => buildRow(eventSeq, keyByFields)
           case FILTERED_ROW => filteredRow(eventSeq)
@@ -82,62 +88,120 @@ class PatternOutput(output: JSONObject, schemaMap: Map[String, (TypeInformation[
   }
 
 
-  def getPatternOutputStreamRowType(keyByFields: String): (Array[String], Array[TypeInformation[_]]) = {
+  def getPatternOutputRowType(keyByFields: String): (Array[String], Array[TypeInformation[_]]) = {
     val originalFieldNames = FlinkSchemaUtils.getFieldNamesFromSchema(schemaMap)
-    val originalFieldTypes = FlinkSchemaUtils.getOutPutFieldTypes(originalFieldNames, schemaMap)
+    val originalFieldTypes = FlinkSchemaUtils.getFieldTypes(originalFieldNames, schemaMap)
     OutputType.outputType(outputType) match {
       case AGG =>
-        val outputFieldNames = FlinkSchemaUtils.getOutputFieldNames(outputFieldList, keyByFields)
-        val outputFieldTypes = FlinkSchemaUtils.getOutPutFieldTypes(outputFieldNames, schemaMap)
-        (outputFieldNames, outputFieldTypes)
+        val outputFieldList = getOutputFieldList(keyByFields)
+        val fieldNames = outputFieldList.map(_._1).toArray
+        val fieldTypes = outputFieldList.map(_._2).toArray
+        (fieldNames, fieldTypes)
       case FILTERED_ROW | DETAIL => (originalFieldNames, originalFieldTypes)
     }
   }
 
+
   /**
     *
-    * agg build row with key_by fields , protocol_type ,ums_ts,ums_id,ums_op (for kafka output)
+    * agg build row with key_by fields
+    * and ums_ts,ums_id,ums_op (if contains)
     *
     **/
 
-  private def buildRow(input: Seq[Iterable[Row]], keyByFields: String) = {
-    val outputFieldSize: Int = outputFieldList.length
-    val keyByFieldsArray = if (keyByFields != null && keyByFields != "") keyByFields.split(";")
-    else null
-    val systemFieldsSize = 3
-    val row = if (keyByFieldsArray != null) {
-      new Row(outputFieldSize + keyByFieldsArray.length + systemFieldsSize)
-    } else new Row(outputFieldSize + systemFieldsSize)
-
-    val umsId = input.flatten.map(row => row.getField(schemaMap(UmsSysField.ID.toString)._2).asInstanceOf[Long]).min
-    row.setField(0, umsId)
-    val umsTs = input.flatten.map(row => row.getField(schemaMap(UmsSysField.TS.toString)._2).asInstanceOf[Timestamp]).min(Ordering[Timestamp])
-    row.setField(1, umsTs)
-    val umsOp = input.flatten.map(row => row.getField(schemaMap(UmsSysField.OP.toString)._2).asInstanceOf[String]).min
-    row.setField(2, umsOp)
-    if (keyByFieldsArray != null)
-      for (keyIndex <- keyByFieldsArray.indices) {
-        val rowFieldType = schemaMap(keyByFieldsArray(keyIndex))._1
-        val rowFieldValue = input.head.head.getField(schemaMap(keyByFieldsArray(keyIndex))._2)
-        val rowTrueValue = object2TrueValue(rowFieldType, rowFieldValue)
-        row.setField(keyIndex + systemFieldsSize, rowTrueValue)
+  private def buildRow(input: Iterable[Iterable[Row]], keyByFields: String) = {
+    val outputFieldList = getOutputFieldList(keyByFields)
+    val aggFieldMap = getAggFieldMap
+    val row: Row = new Row(outputFieldList.size)
+    var pos = 0
+    outputFieldList.foreach(field => {
+      val fieldType = field._3
+      fieldType match {
+        case SYSTEM_FIELD =>
+          val systemFieldValue = UmsSysField.umsSysField(field._1) match {
+            case UmsSysField.ID => input.flatten.map(row => row.getField(schemaMap(UmsSysField.ID.toString)._2).asInstanceOf[Long]).max
+            case UmsSysField.TS => input.flatten.map(row => row.getField(schemaMap(UmsSysField.TS.toString)._2).asInstanceOf[Timestamp]).max(Ordering[Timestamp])
+            case UmsSysField.OP => input.flatten.map(row => row.getField(schemaMap(UmsSysField.OP.toString)._2).asInstanceOf[String]).max
+          }
+          row.setField(pos, systemFieldValue)
+          pos += 1
+        case KEY_BY_FIELD =>
+          val rowFieldType = field._2
+          val rowFieldValue = input.head.head.getField(schemaMap(field._1)._2)
+          val rowTrueValue = object2TrueValue(rowFieldType, rowFieldValue)
+          row.setField(pos, rowTrueValue)
+          pos += 1
+        case AGG_FIELD =>
+          val originalField = aggFieldMap(field._1)._1
+          val functionType = aggFieldMap(field._1)._2
+          val aggValue = new PatternAggregation(input, originalField, schemaMap).aggregationFunction(functionType)
+          logger.debug(aggValue + s"$originalField agg value")
+          row.setField(pos, aggValue)
+          pos += 1
       }
-    for (i <- 0 until outputFieldSize) {
-      val fieldsWithType = outputFieldList(i).split(":")
-      val fieldName = fieldsWithType.head
-      val functionType = fieldsWithType.last
-      val aggregation = new PatternAggregation(input, fieldName, schemaMap)
-      val aggValue = aggregation.aggregationMatch(functionType)
-      println(aggValue + " agg value")
-      if (keyByFieldsArray != null)
-        row.setField(i + keyByFieldsArray.length + systemFieldsSize, aggValue)
-      else row.setField(i + systemFieldsSize, aggValue)
-    }
+    })
     row
   }
 
-  private def filteredRow(input: Seq[Iterable[Row]]) = {
-    val functionType = outputFieldList.head.split(":").last
+
+  /**
+    * @param keyByFields key1,key2
+    *                    outputFieldList: [{"function_type":"max","field_name":"col1","alias_name":"maxCol1"}]
+    *                    systemFieldArray: ums_id_ ,ums_ts_, ums_op_
+    * @return keyByFields+systemFields++originalFields if keyByFields are not empty,
+    *         else systemFields++originalFields
+    */
+
+  private def getOutputFieldList(keyByFields: String): ListBuffer[(String, TypeInformation[_], FieldType)] = {
+    val outPutFieldListBuffer = ListBuffer.empty[(String, TypeInformation[_], FieldType)]
+    if (schemaMap.contains(UmsSysField.ID.toString)) outPutFieldListBuffer.append((UmsSysField.ID.toString, schemaMap(UmsSysField.ID.toString)._1, SYSTEM_FIELD))
+    if (schemaMap.contains(UmsSysField.TS.toString)) outPutFieldListBuffer.append((UmsSysField.TS.toString, schemaMap(UmsSysField.TS.toString)._1, SYSTEM_FIELD))
+    if (schemaMap.contains(UmsSysField.OP.toString)) outPutFieldListBuffer.append((UmsSysField.OP.toString, schemaMap(UmsSysField.OP.toString)._1, SYSTEM_FIELD))
+
+    for (i <- 0 until outputFieldArray.size()) {
+      val outputFieldJsonObj = outputFieldArray.getJSONObject(i)
+      val originalFieldName = outputFieldJsonObj.getString(FIELD_NAME.toString)
+      val aliasName =
+        if (outputFieldJsonObj.getString(ALIAS_NAME.toString) == "") originalFieldName
+        else outputFieldJsonObj.getString(ALIAS_NAME.toString)
+      val fieldType = if (schemaMap.contains(originalFieldName))
+        schemaMap(originalFieldName)._1
+      else Types.INT
+      outPutFieldListBuffer.append((aliasName, fieldType, AGG_FIELD))
+    }
+    if (keyByFields != null && keyByFields.nonEmpty) {
+      val keyByFiledArray = keyByFields.split(",")
+      keyByFiledArray.foreach(field => outPutFieldListBuffer.append((field, schemaMap(field)._1, KEY_BY_FIELD)))
+      outPutFieldListBuffer
+    }
+    else
+      outPutFieldListBuffer
+  }
+
+
+  /**
+    * map[renameField,(originalField,functionType)]
+    */
+
+  private def getAggFieldMap: mutable.Map[String, (String, String)] = {
+    val aggFieldMap = mutable.HashMap.empty[String, (String, String)]
+    for (i <- 0 until outputFieldArray.size()) {
+      val outputFieldJsonObj = outputFieldArray.getJSONObject(i)
+      val originalFieldName = outputFieldJsonObj.getString(FIELD_NAME.toString)
+      val aliasName =
+        if (outputFieldJsonObj.getString(ALIAS_NAME.toString) == "") originalFieldName
+        else outputFieldJsonObj.getString(ALIAS_NAME.toString)
+      val functionType = outputFieldJsonObj.getString(FUNCTION_TYPE.toString)
+      if (aggFieldMap.contains(aliasName)) throw new Exception(s"重复字段名称: $aliasName")
+      else
+        aggFieldMap += (aliasName -> (originalFieldName, functionType))
+    }
+    aggFieldMap
+  }
+
+
+  private def filteredRow(input: Iterable[Iterable[Row]]) = {
+    val functionType = outputFieldArray.getJSONObject(0).getString(FUNCTION_TYPE.toString)
     Functions.functions(functionType) match {
       case HEAD => input.head.head
       case LAST => input.last.last
@@ -147,8 +211,8 @@ class PatternOutput(output: JSONObject, schemaMap: Map[String, (TypeInformation[
     }
   }
 
-  private def maxRow(input: Seq[Iterable[Row]]) = {
-    val fieldNameOfMaxRow = outputFieldList.head.split(":").head
+  private def maxRow(input: Iterable[Iterable[Row]]) = {
+    val fieldNameOfMaxRow = outputFieldArray.getJSONObject(0).getString(FIELD_NAME.toString)
     val (fieldType, fieldIndex) = schemaMap(fieldNameOfMaxRow)
     fieldType match {
       case Types.STRING => input.flatten.maxBy(row => row.getField(fieldIndex).asInstanceOf[String])
@@ -164,8 +228,8 @@ class PatternOutput(output: JSONObject, schemaMap: Map[String, (TypeInformation[
   }
 
 
-  private def minRow(input: Seq[Iterable[Row]]) = {
-    val fieldNameOfMinRow = outputFieldList.head.split(":").head
+  private def minRow(input: Iterable[Iterable[Row]]) = {
+    val fieldNameOfMinRow = outputFieldArray.getJSONObject(0).getString(FIELD_NAME.toString)
     val (fieldType, fieldIndex) = schemaMap(fieldNameOfMinRow)
     fieldType match {
       case Types.STRING => input.flatten.minBy(row => row.getField(fieldIndex).asInstanceOf[String])

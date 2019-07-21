@@ -59,7 +59,7 @@ object UmsCommonUtils extends Serializable {
       case e: Throwable =>
         e.printStackTrace()
         println("no data in json2ums") //todo add logging here
-        Ums(UmsProtocol(UmsProtocolType.FEEDBACK_DIRECTIVE), UmsSchema("defaultNamespace"), None)
+        Ums(UmsProtocol(UmsProtocolType.FEEDBACK_FLOW_START_DIRECTIVE), UmsSchema("defaultNamespace"), None)
     }
   }
 
@@ -105,7 +105,6 @@ object UmsCommonUtils extends Serializable {
     var realKey = null.asInstanceOf[String]
     while (tmpValue != null) {
       val strPosition = tmpValue.indexOf("\"protocol\"")
-      println(strPosition)
       if (strPosition > 0) {
         tmpValue = tmpValue.substring(strPosition + 10).trim
         if (tmpValue.startsWith(":")) {
@@ -131,5 +130,18 @@ object UmsCommonUtils extends Serializable {
         UmsProtocolType.DATA_INCREMENT_DATA.toString + "." + getFieldContentFromJson(umsStr, "namespace")
       else protocolType + "." + namespace
     } else key
+  }
+
+  def checkAndGetProtocolNamespace(key: String, umsStr: String): (String,String) = {
+    if (key == null || key.trim.isEmpty) {
+      val protocolType = getProtocolTypeFromUms(umsStr)
+      val namespace = getFieldContentFromJson(umsStr, "namespace")
+      if (protocolType == null)
+        (UmsProtocolType.DATA_INCREMENT_DATA.toString , getFieldContentFromJson(umsStr, "namespace"))
+      else (protocolType , namespace)
+    } else {
+      val typeNamespace = UmsCommonUtils.getTypeNamespaceFromKafkaKey(key)
+      (typeNamespace._1.toString,typeNamespace._2)
+    }
   }
 }
